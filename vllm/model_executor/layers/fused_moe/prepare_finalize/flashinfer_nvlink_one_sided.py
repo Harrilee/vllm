@@ -11,6 +11,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.utils.moe_trace_logger import get_moe_trace_logger
+from vllm.utils.moe_trace_logger_phase import (
+    layer_index_of_current_moe,
+    phase_of_current_forward,
+)
 
 
 def get_local_sizes():
@@ -119,13 +124,23 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         payloads.append(topk_weights)
 
         assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
-        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
-            token_selected_experts=topk_ids,
-            input_payloads=payloads,
-            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
-            expert_id_payload_index=topk_ids_payload_index,
+        _trace_payload_bytes = sum(
+            t.numel() * t.element_size() for t in payloads
         )
+        with get_moe_trace_logger().time_a2a(
+            op_type="dispatch",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=_trace_payload_bytes,
+            backend="flashinfer_nvlink_one_sided",
+        ):
+            recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
+                token_selected_experts=topk_ids,
+                input_payloads=payloads,
+                runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+                invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
+                expert_id_payload_index=topk_ids_payload_index,
+            )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
@@ -161,8 +176,17 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
-            payload=fused_expert_output,
-            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-        )
+        with get_moe_trace_logger().time_a2a(
+            op_type="combine",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=(
+                fused_expert_output.numel() * fused_expert_output.element_size()
+            ),
+            backend="flashinfer_nvlink_one_sided",
+        ):
+            combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
+                payload=fused_expert_output,
+                runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            )
         output.copy_(combined_output)

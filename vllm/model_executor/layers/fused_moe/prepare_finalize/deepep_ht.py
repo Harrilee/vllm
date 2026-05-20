@@ -13,6 +13,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.math_utils import round_up
+from vllm.utils.moe_trace_logger import get_moe_trace_logger
+from vllm.utils.moe_trace_logger_phase import (
+    layer_index_of_current_moe,
+    phase_of_current_forward,
+)
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -136,30 +141,40 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        (
-            token_data,
-            expert_topk_ids,
-            expert_topk_weights,
-            expert_num_tokens_per_expert_list,
-            handle,
-            event,
-        ) = self.buffer.dispatch(
-            x=token_data,
-            handle=None,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=dispatch_expert_num_tokens,
-            topk_idx=rank_topk_ids,
-            topk_weights=rank_topk_weights,
-            # expert_alignment rounds the number of tokens per expert
-            # to this value.
-            expert_alignment=1,
-            config=self._get_dispatch_config(),
-            previous_event=previous_event,
-            async_finish=self.async_prepare and not dbo_enabled(),
-            allocate_on_comm_stream=False,
-        )
+        _trace_payload_bytes = tokens.numel() * tokens.element_size()
+        if has_scales and token_scales is not None:
+            _trace_payload_bytes += token_scales.numel() * token_scales.element_size()
+        with get_moe_trace_logger().time_a2a(
+            op_type="dispatch",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=_trace_payload_bytes,
+            backend="deepep_high_throughput",
+        ):
+            (
+                token_data,
+                expert_topk_ids,
+                expert_topk_weights,
+                expert_num_tokens_per_expert_list,
+                handle,
+                event,
+            ) = self.buffer.dispatch(
+                x=token_data,
+                handle=None,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=dispatch_expert_num_tokens,
+                topk_idx=rank_topk_ids,
+                topk_weights=rank_topk_weights,
+                # expert_alignment rounds the number of tokens per expert
+                # to this value.
+                expert_alignment=1,
+                config=self._get_dispatch_config(),
+                previous_event=previous_event,
+                async_finish=self.async_prepare and not dbo_enabled(),
+                allocate_on_comm_stream=False,
+            )
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
@@ -364,16 +379,25 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
-        combined_x, _, event = self.buffer.combine(
-            # HT combine only supports BF16
-            x=fused_expert_output,
-            handle=handle,
-            topk_weights=None,
-            config=self._get_combine_config(),
-            previous_event=previous_event,
-            async_finish=do_async and not dbo_enabled(),
-            allocate_on_comm_stream=False,
-        )
+        with get_moe_trace_logger().time_a2a(
+            op_type="combine",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=(
+                fused_expert_output.numel() * fused_expert_output.element_size()
+            ),
+            backend="deepep_high_throughput",
+        ):
+            combined_x, _, event = self.buffer.combine(
+                # HT combine only supports BF16
+                x=fused_expert_output,
+                handle=handle,
+                topk_weights=None,
+                config=self._get_combine_config(),
+                previous_event=previous_event,
+                async_finish=do_async and not dbo_enabled(),
+                allocate_on_comm_stream=False,
+            )
 
         dbo_switch_to_compute()
 

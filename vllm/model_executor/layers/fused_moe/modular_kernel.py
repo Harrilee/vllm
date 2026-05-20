@@ -33,6 +33,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.moe_trace_logger import get_moe_trace_logger
+from vllm.utils.moe_trace_logger_phase import (
+    layer_index_of_current_moe,
+    phase_of_current_forward,
+)
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -1261,23 +1266,35 @@ class FusedMoEKernelModularImpl:
             ):
                 fused_out = output_alias
 
-        self.fused_experts.apply(
-            output=fused_out,
-            hidden_states=a1q,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            a1q_scale=a1q_scale,
-            a2_scale=self.fused_experts.a2_scale,
-            workspace13=workspace13,
-            workspace2=workspace2,
-            expert_tokens_meta=expert_tokens_meta,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+        with get_moe_trace_logger().time_moe_compute(
+            kernel=type(self.fused_experts).__name__,
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            extra={
+                "num_tokens": M_full,
+                "num_experts": global_num_experts,
+                "top_k": top_k,
+                "hidden_size": K,
+                "intermediate_size": N,
+            },
+        ):
+            self.fused_experts.apply(
+                output=fused_out,
+                hidden_states=a1q,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=a1q_scale,
+                a2_scale=self.fused_experts.a2_scale,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         return fused_out
 
@@ -1475,22 +1492,32 @@ class FusedMoEKernelMonolithicImpl:
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
-        fused_out = self.fused_experts.apply(
-            hidden_states=a1q,
-            w1=w1,
-            w2=w2,
-            router_logits=router_logits,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            a1q_scale=a1q_scale,
-            # grouped topk + fused topk bias parameters
-            num_expert_group=num_expert_group,
-            e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-            topk_group=topk_group,
-        )
+        with get_moe_trace_logger().time_moe_compute(
+            kernel=type(self.fused_experts).__name__,
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            extra={
+                "num_tokens": int(a1q.shape[0]) if a1q.dim() >= 1 else None,
+                "num_experts": global_num_experts,
+                "monolithic": True,
+            },
+        ):
+            fused_out = self.fused_experts.apply(
+                hidden_states=a1q,
+                w1=w1,
+                w2=w2,
+                router_logits=router_logits,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                a1q_scale=a1q_scale,
+                # grouped topk + fused topk bias parameters
+                num_expert_group=num_expert_group,
+                e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
+                topk_group=topk_group,
+            )
 
         output = self.prepare_finalize.finalize(fused_out)
 

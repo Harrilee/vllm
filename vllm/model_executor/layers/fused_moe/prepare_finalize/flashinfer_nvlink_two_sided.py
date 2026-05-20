@@ -12,6 +12,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.utils.moe_trace_logger import get_moe_trace_logger
+from vllm.utils.moe_trace_logger_phase import (
+    layer_index_of_current_moe,
+    phase_of_current_forward,
+)
 
 
 def get_local_sizes():
@@ -84,20 +89,27 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         global_num_tokens_cpu = get_local_sizes()
         top_k = topk_ids.size(1)
 
-        (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
-            flashinfer_alltoall_dispatch(
-                self.all2all_manager,
-                global_num_tokens_cpu,
-                a1,
-                quant_config.a1_gscale,
-                topk_ids,
-                topk_weights,
-                top_k,
-                num_experts,
-                quant_config,
-                defer_input_quant=defer_input_quant,
+        with get_moe_trace_logger().time_a2a(
+            op_type="dispatch",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=a1.numel() * a1.element_size(),
+            backend="flashinfer_nvlink_two_sided",
+        ):
+            (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
+                flashinfer_alltoall_dispatch(
+                    self.all2all_manager,
+                    global_num_tokens_cpu,
+                    a1,
+                    quant_config.a1_gscale,
+                    topk_ids,
+                    topk_weights,
+                    top_k,
+                    num_experts,
+                    quant_config,
+                    defer_input_quant=defer_input_quant,
+                )
             )
-        )
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -112,13 +124,22 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     ) -> None:
         top_k = topk_ids.size(1)
         token_count = output.shape[0]
-        fused_expert_output = flashinfer_alltoall_combine(
-            self.all2all_manager,
-            fused_expert_output,
-            top_k=top_k,
-            token_count=token_count,
-            alltoall_info=self.alltoall_info,
-        )
+        with get_moe_trace_logger().time_a2a(
+            op_type="combine",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=(
+                fused_expert_output.numel() * fused_expert_output.element_size()
+            ),
+            backend="flashinfer_nvlink_two_sided",
+        ):
+            fused_expert_output = flashinfer_alltoall_combine(
+                self.all2all_manager,
+                fused_expert_output,
+                top_k=top_k,
+                token_count=token_count,
+                alltoall_info=self.alltoall_info,
+            )
         output.copy_(fused_expert_output)
 
 

@@ -16,6 +16,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.utils.moe_trace_logger import get_moe_trace_logger
+from vllm.utils.moe_trace_logger_phase import (
+    layer_index_of_current_moe,
+    phase_of_current_forward,
+)
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -289,29 +294,36 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
-        (
-            expert_x,
-            expert_num_tokens,
-            handle,
-            _,
-            hook,
-        ) = self.buffer.low_latency_dispatch(
-            a1,
-            dispatch_topk_ids,
-            self.max_tokens_per_rank,
-            num_experts,
-            use_fp8=self.use_fp8_dispatch,
-            round_scale=self.use_ue8m0_dispatch,
-            use_ue8m0=self.use_ue8m0_dispatch,
-            **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
-            **(
-                dict(x_global_scale=qc_a1_gscale_or_scale)
-                if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
-                else dict()
-            ),
-            async_finish=False,
-            return_recv_hook=True,
-        )
+        with get_moe_trace_logger().time_a2a(
+            op_type="dispatch",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=a1.numel() * a1.element_size(),
+            backend="deepep_low_latency",
+        ):
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
+                a1,
+                dispatch_topk_ids,
+                self.max_tokens_per_rank,
+                num_experts,
+                use_fp8=self.use_fp8_dispatch,
+                round_scale=self.use_ue8m0_dispatch,
+                use_ue8m0=self.use_ue8m0_dispatch,
+                **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+                **(
+                    dict(x_global_scale=qc_a1_gscale_or_scale)
+                    if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
+                    else dict()
+                ),
+                async_finish=False,
+                return_recv_hook=True,
+            )
         self.handles[a2a_idx] = handle
 
         return (
@@ -396,16 +408,25 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(
-            fused_expert_output,
-            combine_topk_ids,
-            combine_topk_weights,
-            handle,
-            async_finish=False,
-            zero_copy=False,
-            return_recv_hook=do_recv_hook,
-            out=output,
-        )
+        with get_moe_trace_logger().time_a2a(
+            op_type="combine",
+            layer=layer_index_of_current_moe(),
+            phase=phase_of_current_forward(),
+            payload_bytes=(
+                fused_expert_output.numel() * fused_expert_output.element_size()
+            ),
+            backend="deepep_low_latency",
+        ):
+            _, _, recv_hook = self.buffer.low_latency_combine(
+                fused_expert_output,
+                combine_topk_ids,
+                combine_topk_weights,
+                handle,
+                async_finish=False,
+                zero_copy=False,
+                return_recv_hook=do_recv_hook,
+                out=output,
+            )
 
         return recv_hook, lambda: None
 
