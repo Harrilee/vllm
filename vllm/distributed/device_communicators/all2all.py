@@ -226,6 +226,15 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_qps_per_rank=num_qps_per_rank,
             explicitly_destroy=True,
         )
+        # LOCAL PATCH (oci-hsg GB200 cross-node): the hybrid-ep DeepEP build
+        # exposes use_fabric -> CU_MEM_HANDLE_TYPE_FABRIC shareable handles, the
+        # only cross-node MNNVL path that works here. The stock allow_mnnvl path
+        # fails at deep_ep.cpp runtime.sync with 'invalid resource handle'.
+        # Gated on VLLM_DEEPEP_USE_FABRIC (set when the hybrid-ep overlay is on
+        # PYTHONPATH); no-op on a DeepEP build without the use_fabric kwarg.
+        import os as _os
+        if _os.environ.get("VLLM_DEEPEP_USE_FABRIC") == "1":
+            kwargs["use_fabric"] = True
         return kwargs
 
     def get_handle(self, kwargs):
@@ -303,6 +312,12 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             explicitly_destroy=True,
         )
+        # LOCAL PATCH (oci-hsg GB200 cross-node): use the hybrid-ep DeepEP
+        # use_fabric path (CU_MEM_HANDLE_TYPE_FABRIC) for cross-node DeepEP-LL.
+        # Stock allow_mnnvl fails at runtime.sync 'invalid resource handle'.
+        import os as _os
+        if _os.environ.get("VLLM_DEEPEP_USE_FABRIC") == "1":
+            kwargs["use_fabric"] = True
         return kwargs
 
     def get_handle(self, kwargs):

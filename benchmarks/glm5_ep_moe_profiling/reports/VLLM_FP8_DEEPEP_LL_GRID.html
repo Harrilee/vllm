@@ -1,0 +1,37 @@
+<!DOCTYPE html><html><head><meta charset=utf-8><title>vLLM FP8 DeepEP-LL Grid</title>
+<style>body{font:14px/1.5 -apple-system,Segoe UI,sans-serif;max-width:900px;margin:2rem auto;padding:0 1.5rem}
+h1{border-bottom:3px solid #16a34a;padding-bottom:.3rem}table{border-collapse:collapse;width:100%;font-size:13px;margin:.8rem 0}
+th,td{border:1px solid #ccc;padding:4px 8px;text-align:right}th{background:#f0fdf4}td:first-child,th:first-child{text-align:left}
+.k{background:#f0fdf4;border-left:4px solid #16a34a;padding:.6rem 1rem;margin:1rem 0}code{background:#f3f4f6;padding:1px 4px}</style></head><body>
+<h1>vLLM FP8 GLM-5 DeepEP-LL Grid — true reproduction of the sglang HTML</h1>
+<p>oci-hsg GB200 NVL72 · GLM-5-FP8 · <b>real cross-node DeepEP low-latency</b> (<code>deep_ep::internode_ll::dispatch/combine</code>) · MoE expert = <code>deep_gemm sm100_fp8</code> · torch.profiler in-CUDA-graph timing. Decode per-kernel p50 (µs).</p>
+<div class=k><b>The fix that unblocked this.</b> The vllm-openai image ships DeepEP <code>73b6ea4</code> (allow_mnnvl, no use_fabric) which fails cross-node at <code>deep_ep.cpp:226 'invalid resource handle'</code>. sglang works because it builds DeepEP's <b>hybrid-ep</b> branch with <code>Buffer(use_fabric=True)</code> → <code>CU_MEM_HANDLE_TYPE_FABRIC</code> shareable handles. Fix (no image rebuild): built hybrid-ep DeepEP <code>d28bd67</code> into a /home overlay (only deep_ep_cpp; CUDA dev headers via pip), patched vLLM <code>all2all.py</code> to pass <code>use_fabric=True</code> under <code>VLLM_DEEPEP_USE_FABRIC=1</code>, bind-mounted both into the container. Verified: 8-rank cross-node Buffer SUCCESS, then this full EP8–64 grid.</div>
+<table><thead><tr><th>EP</th><th>bs</th><th>dispatch</th><th>combine</th><th>moe_compute</th></tr></thead><tbody>
+<tr><td>ep8</td><td>1</td><td>11.04</td><td>7.36</td><td>9.79</td></tr>
+<tr><td>ep8</td><td>2</td><td>12.22</td><td>8.83</td><td>9.95</td></tr>
+<tr><td>ep8</td><td>8</td><td>13.95</td><td>10.08</td><td>10.05</td></tr>
+<tr><td>ep8</td><td>32</td><td>14.37</td><td>11.26</td><td>10.18</td></tr>
+<tr><td>ep8</td><td>64</td><td>14.56</td><td>11.39</td><td>9.86</td></tr>
+<tr><td>ep8</td><td>128</td><td>15.07</td><td>12.77</td><td>10.02</td></tr>
+<tr><td>ep16</td><td>1</td><td>11.42</td><td>7.52</td><td>9.41</td></tr>
+<tr><td>ep16</td><td>2</td><td>11.39</td><td>8.8</td><td>9.5</td></tr>
+<tr><td>ep16</td><td>8</td><td>13.22</td><td>9.82</td><td>9.7</td></tr>
+<tr><td>ep16</td><td>32</td><td>14.59</td><td>10.56</td><td>9.79</td></tr>
+<tr><td>ep16</td><td>64</td><td>14.91</td><td>10.85</td><td>9.82</td></tr>
+<tr><td>ep16</td><td>128</td><td>15.07</td><td>11.23</td><td>9.89</td></tr>
+<tr><td>ep32</td><td>1</td><td>13.7</td><td>8.54</td><td>9.02</td></tr>
+<tr><td>ep32</td><td>2</td><td>13.44</td><td>8.9</td><td>9.15</td></tr>
+<tr><td>ep32</td><td>8</td><td>13.35</td><td>9.09</td><td>9.34</td></tr>
+<tr><td>ep32</td><td>32</td><td>14.21</td><td>9.31</td><td>9.34</td></tr>
+<tr><td>ep32</td><td>64</td><td>14.59</td><td>9.95</td><td>9.54</td></tr>
+<tr><td>ep32</td><td>128</td><td>14.91</td><td>10.4</td><td>9.63</td></tr>
+<tr><td>ep64</td><td>1</td><td>13.63</td><td>8.7</td><td>8.83</td></tr>
+<tr><td>ep64</td><td>2</td><td>13.5</td><td>8.7</td><td>8.9</td></tr>
+<tr><td>ep64</td><td>8</td><td>14.14</td><td>8.93</td><td>9.02</td></tr>
+<tr><td>ep64</td><td>32</td><td>14.24</td><td>9.02</td><td>9.09</td></tr>
+<tr><td>ep64</td><td>64</td><td>14.21</td><td>9.09</td><td>9.09</td></tr>
+<tr><td>ep64</td><td>128</td><td>15.49</td><td>9.5</td><td>9.28</td></tr>
+</tbody></table>
+<div class=k><b>HTML insights reproduced on vLLM.</b> ① a2a latency-bound: dispatch ~flat across bs (EP8 11→15µs over bs1→128). ② EP scaling barely moves dispatch (EP8→64 ~11→13.6µs at bs1). ③ moe_compute shrinks with EP (9.79µs EP8 → 8.83µs EP64 at bs1 — more experts, fewer per rank). Matches sglang DeepEP-LL baseline (dispatch ~11-15, combine ~9-13, moe ~8-10µs) within ~1-2µs.</div>
+<p>Data: <code>sweep_data/vllm_results.csv</code> (meta tag <code>deepep_ll_fabric</code>) · overlay <code>/home/harrli/deepep-hybrid-install</code> · launcher <code>sweep_vllm_deepep_fp8.sh</code></p>
+</body></html>

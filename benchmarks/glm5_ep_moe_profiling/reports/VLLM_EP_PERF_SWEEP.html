@@ -1,0 +1,54 @@
+<!DOCTYPE html><html><head><meta charset=utf-8><title>vLLM GLM-5 EP MoE Sweep</title>
+<style>body{font:14px/1.5 -apple-system,Segoe UI,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1.5rem}
+h1{border-bottom:3px solid #2563eb;padding-bottom:.3rem}h2{color:#1e40af;margin-top:2rem}
+table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:12.5px}th,td{border:1px solid #ccc;padding:3px 7px;text-align:right}
+th{background:#f3f4f6}td:first-child,th:first-child{text-align:left}.k{background:#eff6ff;border-left:4px solid #2563eb;padding:.5rem 1rem;margin:.8rem 0}
+.w{background:#fef2f2;border-left:4px solid #dc2626;padding:.5rem 1rem;margin:.8rem 0}code{background:#f3f4f6;padding:1px 4px}</style></head><body>
+<h1>vLLM GLM-5 EP MoE Performance Sweep</h1>
+<p>oci-hsg-cs-001 GB200 NVL72 · GLM-5-NVFP4 · vLLM nightly-aarch64 (0.22.1rc1) · torch.profiler in-CUDA-graph kernel timing · reproduction of the sglang EP_PERF_SWEEP on vLLM</p>
+<div class=w><b>Backend availability (this image).</b> The sglang study used DeepEP-LL across all EP. On vLLM here: <b>DeepEP-LL+NVFP4 is broken</b> (FlashInfer-CUTEDSL ↔ cutlass-MLIR binding crash); <b>DeepEP-HT and flashinfer_nvlink_one_sided are EP4-only</b> (HT asserts low_latency cross-node; nvlink one-sided needs MNNVL/IMEX fabric not configured); <b>allgather_reducescatter (NCCL)</b> is the only multi-node backend, and it <b>wedges/degrades badly cross-rack</b> (EP16 dispatch 158µs, EP32 410µs vs EP4 22µs). So the clean comparable grid is EP4 (4 backends) + EP8 single-rack (NCCL) + the sglang-NCCL baseline.</div>
+<h2>flashinfer_nvlink_one_sided</h2><table><thead><tr><th>EP</th><th>bs</th><th>dispatch</th><th>combine</th><th>moe_compute</th></tr></thead><tbody>
+<tr><td>ep4</td><td>bs1</td><td>9.12</td><td>15.17</td><td>11.9</td></tr>
+<tr><td>ep4</td><td>bs2</td><td>11.62</td><td>16.7</td><td>10.18</td></tr>
+<tr><td>ep4</td><td>bs8</td><td>13.22</td><td>19.01</td><td>9.63</td></tr>
+<tr><td>ep4</td><td>bs32</td><td>13.47</td><td>22.14</td><td>9.7</td></tr>
+<tr><td>ep4</td><td>bs64</td><td>12.74</td><td>24.74</td><td>9.41</td></tr>
+<tr><td>ep4</td><td>bs128</td><td>12.93</td><td>25.95</td><td>10.02</td></tr>
+</tbody></table>
+<h2>deepep_high_throughput</h2><table><thead><tr><th>EP</th><th>bs</th><th>dispatch</th><th>combine</th><th>moe_compute</th></tr></thead><tbody>
+<tr><td>ep4</td><td>bs1</td><td>9.76</td><td>26.21</td><td>12.93</td></tr>
+<tr><td>ep4</td><td>bs2</td><td>11.87</td><td>26.56</td><td>12.67</td></tr>
+<tr><td>ep4</td><td>bs8</td><td>16.9</td><td>52.8</td><td>9.15</td></tr>
+<tr><td>ep4</td><td>bs32</td><td>19.78</td><td>48.26</td><td>9.86</td></tr>
+<tr><td>ep4</td><td>bs64</td><td>20.32</td><td>44.64</td><td>11.14</td></tr>
+<tr><td>ep4</td><td>bs128</td><td>22.11</td><td>39.58</td><td>8.9</td></tr>
+</tbody></table>
+<h2>allgather_reducescatter (NCCL)</h2><table><thead><tr><th>EP</th><th>bs</th><th>dispatch</th><th>combine</th><th>moe_compute</th></tr></thead><tbody>
+<tr><td>ep4</td><td>bs1</td><td>14.02</td><td>16.93</td><td>11.84</td></tr>
+<tr><td>ep4</td><td>bs2</td><td>14.88</td><td>15.17</td><td>10.34</td></tr>
+<tr><td>ep4</td><td>bs8</td><td>22.82</td><td>17.76</td><td>10.43</td></tr>
+<tr><td>ep4</td><td>bs32</td><td>21.92</td><td>20.67</td><td>10.02</td></tr>
+<tr><td>ep4</td><td>bs64</td><td>22.24</td><td>22.56</td><td>9.31</td></tr>
+<tr><td>ep4</td><td>bs128</td><td>22.82</td><td>23.52</td><td>9.41</td></tr>
+<tr><td>ep8</td><td>bs1</td><td>34.98</td><td>26.21</td><td>8.93</td></tr>
+<tr><td>ep8</td><td>bs2</td><td>36.03</td><td>28.54</td><td>8.9</td></tr>
+<tr><td>ep8</td><td>bs8</td><td>39.2</td><td>27.39</td><td>9.18</td></tr>
+<tr><td>ep8</td><td>bs32</td><td>39.78</td><td>28.03</td><td>10.02</td></tr>
+<tr><td>ep8</td><td>bs64</td><td>39.71</td><td>29.02</td><td>10.05</td></tr>
+<tr><td>ep8</td><td>bs128</td><td>39.39</td><td>31.75</td><td>9.7</td></tr>
+<tr><td>ep16</td><td>bs1</td><td>157.6</td><td>72.26</td><td>9.92</td></tr>
+<tr><td>ep32</td><td>bs1</td><td>410.24</td><td>138.08</td><td>9.57</td></tr>
+<tr><td>ep32</td><td>bs2</td><td>415.94</td><td>132.58</td><td>9.57</td></tr>
+</tbody></table>
+<h2>sglang --moe-a2a-backend none (NCCL)</h2><table><thead><tr><th>EP</th><th>bs</th><th>dispatch</th><th>combine</th><th>moe_compute</th></tr></thead><tbody>
+<tr><td>ep4</td><td>bs1</td><td>15.94</td><td>31.3</td><td>8.58</td></tr>
+<tr><td>ep4</td><td>bs2</td><td>16.1</td><td>27.33</td><td>8.58</td></tr>
+<tr><td>ep4</td><td>bs8</td><td>20.58</td><td>26.94</td><td>8.64</td></tr>
+<tr><td>ep4</td><td>bs32</td><td>20.61</td><td>27.39</td><td>8.64</td></tr>
+<tr><td>ep4</td><td>bs64</td><td>21.06</td><td>26.4</td><td>8.64</td></tr>
+<tr><td>ep4</td><td>bs128</td><td>21.44</td><td>29.98</td><td>8.61</td></tr>
+</tbody></table>
+<div class=k><b>Reproduced HTML insights.</b> ① a2a latency-bound: dispatch ~flat across bs at fixed EP (nvlink EP4 9→13µs over bs1→128). ③ moe_compute ~flat 9-10µs, EP-independent. ⑤ dtype: moe_compute identical across backends (same NVFP4 FP4 GEMM). <b>NEW cross-framework:</b> vLLM allgather ≈ sglang none (same NCCL kernels, dispatch within ~10%). <b>NEW divergence:</b> none of vLLM&rsquo;s working backends reproduce DeepEP-LL&rsquo;s flat ~12µs EP-scaling — NCCL allgather rises 22→40µs (EP4→8) and explodes cross-rack.</div>
+<p>Data: <code>sweep_data/vllm_results.csv</code> · launchers <code>sbatch_vllm_glm5.sh</code>/<code>sweep_vllm.sh</code> · analyzer <code>scripts/analyze_moe_perf_vllm.py</code></p>
+<div class=w><b>FP8 + DeepEP-LL attempt (to reproduce the HTML's true DeepEP-LL grid).</b> FP8 GLM-5 weights route MoE through <code>BatchedDeepGemmExperts</code> (= sglang's deep_gemm FP8 path, no broken CUTEDSL) — this SOLVED the expert-backend crash. But: (1) FP8 (705GB) OOMs on EP4 (4&times;184GB), needs EP8+; (2) EP8 FP8 + deepep_low_latency single-rack (job 3272018, nvl72022) hit the SAME cross-node wall as NVFP4 EP8: <code>deep_ep.cpp:226 'invalid resource handle'</code> (cudaIpc handle can't cross nodes). <b>Conclusion: DeepEP cross-node (EP8+) is impossible on this cluster regardless of dtype</b> — a host-fabric (MNNVL/IMEX channel) configuration gap, not a code/dtype issue. DeepEP works only single-NODE (EP4) here. Reproducing the HTML's full DeepEP-LL EP4-64 grid needs cluster admins to enable GB200 MNNVL/IMEX (the same blocker the sglang runbook documents).</div>
+</body></html>
